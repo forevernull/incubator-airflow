@@ -240,7 +240,7 @@ your GHE installation will be able to login to Airflow.
     client_id = oauth_key_from_github_enterprise
     client_secret = oauth_secret_from_github_enterprise
     oauth_callback_route = /example/ghe_oauth/callback
-    allowed_teams = example_team_1, example_team_2
+    allowed_teams = 1, 345, 23
 
 Setting up GHE Authentication
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -288,3 +288,25 @@ backend. In order to setup an application:
 5. Fill in the required information (the 'Authorized redirect URIs' must be fully qualifed e.g. http://airflow.example.com/oauth2callback)
 6. Click 'Create'
 7. Copy 'Client ID', 'Client Secret', and your redirect URI to your airflow.cfg according to the above example
+
+SSL
+---
+
+SSL can be enabled by providing a certificate and key. Once enabled, be sure to use
+"https://" in your browser.
+
+.. code-block:: bash
+
+    [webserver]
+    web_server_ssl_cert = <path to cert>
+    web_server_ssl_key = <path to key>
+
+Enabling SSL will not automatically change the web server port. If you want to use the
+standard port 443, you'll need to configure that too. Be aware that super user privileges
+(or cap_net_bind_service on Linux) are required to listen on port 443.
+
+.. code-block:: bash
+
+    # Optionally, set the server to listen on the standard SSL port.
+    web_server_port = 443
+    base_url = http://<hostname or IP>:443

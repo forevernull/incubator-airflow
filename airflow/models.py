@@ -513,6 +513,30 @@ class Connection(Base):
     is_extra_encrypted = Column(Boolean, unique=False, default=False)
     _extra = Column('extra', String(5000))
 
+    _types = [
+        ('fs', 'File (path)'),
+        ('ftp', 'FTP',),
+        ('google_cloud_platform', 'Google Cloud Platform'),
+        ('hdfs', 'HDFS',),
+        ('http', 'HTTP',),
+        ('hive_cli', 'Hive Client Wrapper',),
+        ('hive_metastore', 'Hive Metastore Thrift',),
+        ('hiveserver2', 'Hive Server 2 Thrift',),
+        ('jdbc', 'Jdbc Connection',),
+        ('mysql', 'MySQL',),
+        ('postgres', 'Postgres',),
+        ('oracle', 'Oracle',),
+        ('vertica', 'Vertica',),
+        ('presto', 'Presto',),
+        ('s3', 'S3',),
+        ('samba', 'Samba',),
+        ('sqlite', 'Sqlite',),
+        ('ssh', 'SSH',),
+        ('cloudant', 'IBM Cloudant',),
+        ('mssql', 'Microsoft SQL Server'),
+        ('mesos_framework-id', 'Mesos Framework ID'),
+    ]
+
     def __init__(
             self, conn_id=None, conn_type=None,
             host=None, login=None, password=None,
@@ -1268,6 +1292,8 @@ class TaskInstance(Base):
                     self.xcom_push(key=XCOM_RETURN_KEY, value=result)
 
                 task_copy.post_execute(context=context)
+                Stats.incr('operator_successes_{}'.format(
+                    self.task.__class__.__name__), 1, 1)
             self.state = State.SUCCESS
         except AirflowSkipException:
             self.state = State.SKIPPED
@@ -1307,6 +1333,7 @@ class TaskInstance(Base):
         session = settings.Session()
         self.end_date = datetime.now()
         self.set_duration()
+        Stats.incr('operator_failures_{}'.format(task.__class__.__name__), 1, 1)
         if not test_mode:
             session.add(Log(State.FAILED, self))
 
@@ -2785,15 +2812,6 @@ class DAG(BaseDag, LoggingMixin):
                 l.append(task.subdag)
                 l += task.subdag.subdags
         return l
-
-    @property
-    def reached_max_runs(self):
-        active_runs = DagRun.find(
-            dag_id=self.dag_id,
-            state=State.RUNNING,
-            external_trigger=False
-        )
-        return len(active_runs) >= self.max_active_runs
 
     def resolve_template_files(self):
         for t in self.tasks:

@@ -18,6 +18,11 @@ Here are some of the common causes:
 - Is your ``start_date`` set properly? The Airflow scheduler triggers the
   task soon after the ``start_date + scheduler_interval`` is passed.
 
+- Is your ``schedule_interval`` set properly? The default ``schedule_interval``
+  is one day (``datetime.timedelta(1)``). You must specify a different ``schedule_interval``
+  directly to the DAG object you instantiate, not as a ``default_param``, as task instances
+  do not override their parent DAG's ``schedule_interval``.
+
 - Is your ``start_date`` beyond where you can see it in the UI? If you
   set your it to some time say 3 months ago, you won't be able to see
   it in the main view in the UI, but you should be able to see it in the
@@ -135,7 +140,7 @@ There are many layers of ``airflow run`` commands, meaning it can call itself.
   command in the queue for it to run remote, on the worker. If using
   LocalExecutor, that translates into running it in a subprocess pool.
 - Local ``airflow run --local``: starts an ``airflow run --raw``
-  command (described bellow) as a subprocess and is in charge of
+  command (described below) as a subprocess and is in charge of
   emitting heartbeats, listening for external kill signals
   and ensures some cleanup takes place if the subprocess fails
 - Raw ``airflow run --raw`` runs the actual operator's execute method and

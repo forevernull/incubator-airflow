@@ -30,6 +30,7 @@ from time import sleep
 import warnings
 
 from dateutil.relativedelta import relativedelta
+import sqlalchemy
 
 from airflow import configuration
 from airflow.executors import SequentialExecutor, LocalExecutor
@@ -48,6 +49,7 @@ from airflow.operators.http_operator import SimpleHttpOperator
 from airflow.operators import sensors
 from airflow.hooks.base_hook import BaseHook
 from airflow.hooks.sqlite_hook import SqliteHook
+from airflow.hooks.postgres_hook import PostgresHook
 from airflow.bin import cli
 from airflow.www import app as application
 from airflow.settings import Session
@@ -60,7 +62,7 @@ from airflow.configuration import AirflowConfigException
 
 import six
 
-NUM_EXAMPLE_DAGS = 16
+NUM_EXAMPLE_DAGS = 18
 DEV_NULL = '/dev/null'
 TEST_DAG_FOLDER = os.path.join(
     os.path.dirname(os.path.realpath(__file__)), 'dags')
@@ -917,6 +919,194 @@ class CliTests(unittest.TestCase):
     def test_cli_initdb(self):
         cli.initdb(self.parser.parse_args(['initdb']))
 
+    def test_cli_connections_list(self):
+        with mock.patch('sys.stdout',
+                        new_callable=six.StringIO) as mock_stdout:
+            cli.connections(self.parser.parse_args(['connections', '--list']))
+            stdout = mock_stdout.getvalue()
+        conns = [[x.strip("'") for x in re.findall("'\w+'", line)[:2]]
+                  for ii, line in enumerate(stdout.split('\n'))
+                  if ii % 2 == 1]
+        conns = [conn for conn in conns if len(conn) > 0]
+
+        # Assert that some of the connections are present in the output as
+        # expected:
+        self.assertIn(['aws_default', 'aws'], conns)
+        self.assertIn(['beeline_default', 'beeline'], conns)
+        self.assertIn(['bigquery_default', 'bigquery'], conns)
+        self.assertIn(['emr_default', 'emr'], conns)
+        self.assertIn(['mssql_default', 'mssql'], conns)
+        self.assertIn(['mysql_default', 'mysql'], conns)
+        self.assertIn(['postgres_default', 'postgres'], conns)
+
+        # Attempt to list connections with invalid cli args
+        with mock.patch('sys.stdout',
+                        new_callable=six.StringIO) as mock_stdout:
+            cli.connections(self.parser.parse_args(
+                ['connections', '--list', '--conn_id=fake',
+                 '--conn_uri=fake-uri']))
+            stdout = mock_stdout.getvalue()
+
+        # Check list attempt stdout
+        lines = [l for l in stdout.split('\n') if len(l) > 0]
+        self.assertListEqual(lines, [
+            ("\tThe following args are not compatible with the " +
+             "--list flag: ['conn_id', 'conn_uri']"),
+        ])
+
+    def test_cli_connections_add_delete(self):
+        # Add connections:
+        uri = 'postgresql://airflow:airflow@host:5432/airflow'
+        with mock.patch('sys.stdout',
+                        new_callable=six.StringIO) as mock_stdout:
+            cli.connections(self.parser.parse_args(
+                ['connections', '--add', '--conn_id=new1',
+                 '--conn_uri=%s' % uri]))
+            cli.connections(self.parser.parse_args(
+                ['connections', '-a', '--conn_id=new2',
+                 '--conn_uri=%s' % uri]))
+            cli.connections(self.parser.parse_args(
+                ['connections', '--add', '--conn_id=new3',
+                 '--conn_uri=%s' % uri, '--conn_extra', "{'extra': 'yes'}"]))
+            cli.connections(self.parser.parse_args(
+                ['connections', '-a', '--conn_id=new4',
+                 '--conn_uri=%s' % uri, '--conn_extra', "{'extra': 'yes'}"]))
+            stdout = mock_stdout.getvalue()
+
+        # Check addition stdout
+        lines = [l for l in stdout.split('\n') if len(l) > 0]
+        self.assertListEqual(lines, [
+            ("\tSuccessfully added `conn_id`=new1 : " +
+             "postgresql://airflow:airflow@host:5432/airflow"),
+            ("\tSuccessfully added `conn_id`=new2 : " +
+             "postgresql://airflow:airflow@host:5432/airflow"),
+            ("\tSuccessfully added `conn_id`=new3 : " +
+             "postgresql://airflow:airflow@host:5432/airflow"),
+            ("\tSuccessfully added `conn_id`=new4 : " +
+             "postgresql://airflow:airflow@host:5432/airflow"),
+        ])
+
+        # Attempt to add duplicate
+        with mock.patch('sys.stdout',
+                        new_callable=six.StringIO) as mock_stdout:
+            cli.connections(self.parser.parse_args(
+                ['connections', '--add', '--conn_id=new1',
+                 '--conn_uri=%s' % uri]))
+            stdout = mock_stdout.getvalue()
+
+        # Check stdout for addition attempt
+        lines = [l for l in stdout.split('\n') if len(l) > 0]
+        self.assertListEqual(lines, [
+            "\tA connection with `conn_id`=new1 already exists",
+        ])
+
+        # Attempt to add without providing conn_id
+        with mock.patch('sys.stdout',
+                        new_callable=six.StringIO) as mock_stdout:
+            cli.connections(self.parser.parse_args(
+                ['connections', '--add', '--conn_uri=%s' % uri]))
+            stdout = mock_stdout.getvalue()
+
+        # Check stdout for addition attempt
+        lines = [l for l in stdout.split('\n') if len(l) > 0]
+        self.assertListEqual(lines, [
+            ("\tThe following args are required to add a connection:" +
+             " ['conn_id']"),
+        ])
+
+        # Attempt to add without providing conn_uri
+        with mock.patch('sys.stdout',
+                        new_callable=six.StringIO) as mock_stdout:
+            cli.connections(self.parser.parse_args(
+                ['connections', '--add', '--conn_id=new']))
+            stdout = mock_stdout.getvalue()
+
+        # Check stdout for addition attempt
+        lines = [l for l in stdout.split('\n') if len(l) > 0]
+        self.assertListEqual(lines, [
+            ("\tThe following args are required to add a connection:" +
+             " ['conn_uri']"),
+        ])
+
+        # Prepare to add connections
+        session = settings.Session()
+        extra = {'new1': None,
+                 'new2': None,
+                 'new3': "{'extra': 'yes'}",
+                 'new4': "{'extra': 'yes'}"}
+
+        # Add connections
+        for conn_id in ['new1', 'new2', 'new3', 'new4']:
+            result = (session
+                      .query(models.Connection)
+                      .filter(models.Connection.conn_id == conn_id)
+                      .first())
+            result = (result.conn_id, result.conn_type, result.host,
+                      result.port, result.get_extra())
+            self.assertEqual(result, (conn_id, 'postgres', 'host', 5432,
+                                      extra[conn_id]))
+
+        # Delete connections
+        with mock.patch('sys.stdout',
+                        new_callable=six.StringIO) as mock_stdout:
+            cli.connections(self.parser.parse_args(
+                ['connections', '--delete', '--conn_id=new1']))
+            cli.connections(self.parser.parse_args(
+                ['connections', '--delete', '--conn_id=new2']))
+            cli.connections(self.parser.parse_args(
+                ['connections', '--delete', '--conn_id=new3']))
+            cli.connections(self.parser.parse_args(
+                ['connections', '--delete', '--conn_id=new4']))
+            stdout = mock_stdout.getvalue()
+
+        # Check deletion stdout
+        lines = [l for l in stdout.split('\n') if len(l) > 0]
+        self.assertListEqual(lines, [
+            "\tSuccessfully deleted `conn_id`=new1",
+            "\tSuccessfully deleted `conn_id`=new2",
+            "\tSuccessfully deleted `conn_id`=new3",
+            "\tSuccessfully deleted `conn_id`=new4"
+        ])
+
+        # Check deletions
+        for conn_id in ['new1', 'new2', 'new3', 'new4']:
+            result = (session
+                      .query(models.Connection)
+                      .filter(models.Connection.conn_id == conn_id)
+                      .first())
+
+            self.assertTrue(result is None)
+
+        # Attempt to delete a non-existing connnection
+        with mock.patch('sys.stdout',
+                        new_callable=six.StringIO) as mock_stdout:
+            cli.connections(self.parser.parse_args(
+                ['connections', '--delete', '--conn_id=fake']))
+            stdout = mock_stdout.getvalue()
+
+        # Check deletion attempt stdout
+        lines = [l for l in stdout.split('\n') if len(l) > 0]
+        self.assertListEqual(lines, [
+            "\tDid not find a connection with `conn_id`=fake",
+        ])
+
+        # Attempt to delete with invalid cli args
+        with mock.patch('sys.stdout',
+                        new_callable=six.StringIO) as mock_stdout:
+            cli.connections(self.parser.parse_args(
+                ['connections', '--delete', '--conn_id=fake',
+                 '--conn_uri=%s' % uri]))
+            stdout = mock_stdout.getvalue()
+
+        # Check deletion attempt stdout
+        lines = [l for l in stdout.split('\n') if len(l) > 0]
+        self.assertListEqual(lines, [
+            ("\tThe following args are not compatible with the " +
+             "--delete flag: ['conn_uri']"),
+        ])
+
+        session.close()
+
     def test_cli_test(self):
         cli.test(self.parser.parse_args([
             'test', 'example_bash_operator', 'runme_0',
@@ -1541,6 +1731,21 @@ class ConnectionTest(unittest.TestCase):
         assert c.password == 'password'
         assert c.port == 5432
         del os.environ['AIRFLOW_CONN_AIRFLOW_DB']
+
+    def test_dbapi_get_uri(self):
+        conn = BaseHook.get_connection(conn_id='test_uri')
+        hook = conn.get_hook()
+        assert hook.get_uri() == 'postgres://username:password@ec2.compute.com:5432/the_database'
+        conn2 = BaseHook.get_connection(conn_id='test_uri_no_creds')
+        hook2 = conn2.get_hook()
+        assert hook2.get_uri() == 'postgres://ec2.compute.com/the_database'
+
+    def test_dbapi_get_sqlalchemy_engine(self):
+        conn = BaseHook.get_connection(conn_id='test_uri')
+        hook = conn.get_hook()
+        engine = hook.get_sqlalchemy_engine()
+        assert isinstance(engine, sqlalchemy.engine.Engine)
+        assert str(engine.url) == 'postgres://username:password@ec2.compute.com:5432/the_database'
 
 
 class WebHDFSHookTest(unittest.TestCase):

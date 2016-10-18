@@ -156,6 +156,9 @@ class BaseJob(Base, LoggingMixin):
         '''
         session = settings.Session()
         job = session.query(BaseJob).filter_by(id=self.id).one()
+        make_transient(job)
+        session.commit()
+        session.close()
 
         if job.state == State.SHUTDOWN:
             self.kill()
@@ -168,6 +171,7 @@ class BaseJob(Base, LoggingMixin):
 
         job.latest_heartbeat = datetime.now()
 
+        session = settings.Session()
         session.merge(job)
         session.commit()
 
@@ -1073,10 +1077,6 @@ class SchedulerJob(BaseJob):
         """
         for dag in dags:
             dag = dagbag.get_dag(dag.dag_id)
-            if dag.reached_max_runs:
-                self.logger.info("Not processing DAG {} since its max runs has been reached"
-                                .format(dag.dag_id))
-                continue
             if dag.is_paused:
                 self.logger.info("Not processing DAG {} since it's paused"
                                  .format(dag.dag_id))
@@ -1324,7 +1324,7 @@ class SchedulerJob(BaseJob):
 
         # For the execute duration, parse and schedule DAGs
         while (datetime.now() - execute_start_time).total_seconds() < \
-                self.run_duration:
+                self.run_duration or self.run_duration < 0:
             self.logger.debug("Starting Loop...")
             loop_start_time = time.time()
 
